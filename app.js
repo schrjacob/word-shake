@@ -6,7 +6,8 @@ import { firebaseConfig } from "./firebase-config.js";
 // ---------- rules ----------
 const DICE4 = ["AAEEGN","ABBJOO","ACHOPS","AFFKPS","AOOTTW","CIMOTU","DEILRX","DELRVY","DISTTY","EEGHNW","EEINSU","EHRTVW","EIOSST","ELRTTY","HIMNUQ","HLNNRZ"];
 const DICE5 = ["AAAFRS","AAEEEE","AAFIRS","ADENNN","AEEEEM","AEEGMU","AEGMNN","AFIRSY","BJKQXZ","CCENST","CEIILT","CEILPT","CEIPST","DDHNOT","DHHLOR","DHLNOR","DHLNOR","EIIITT","EMOTTT","ENSSSU","FIPRSY","GORRVW","IPRRRY","NOOTUW","OOOTTU"];
-const DEF = { duration: 180, size: 4, minLen: 3, cancel: true, dict: true };
+const DEF = { duration: 180, size: 4, minLen: 3, cancel: true, dict: true, ready: "all" };
+const HEARTBEAT = 25000, AWAY_AFTER = 75000; // players whose page hasn't checked in for 75 s don't count
 const DURATIONS = [60, 90, 120, 180, 240, 300];
 const COUNTDOWN = 3500;
 const pts = n => n < 3 ? 0 : n <= 4 ? 1 : n === 5 ? 2 : n === 6 ? 3 : n === 7 ? 5 : 11;
@@ -49,11 +50,13 @@ async function firebaseStore(cfg) {
   const wrap = s => ({ id: s.id, exists: s.exists(), data: s.exists() ? s.data() : undefined });
   return {
     uid: cred.user.uid,
+    serverTime: () => F.serverTimestamp(),
     doc: p => {
       const r = F.doc(fs, p);
       return {
         get: async () => wrap(await F.getDoc(r)),
         set: d => F.setDoc(r, d),
+        merge: d => F.setDoc(r, d, { merge: true }),
         update: d => F.updateDoc(r, d),
         onSnapshot: (next, err) => F.onSnapshot(r, s => next(wrap(s)), err),
       };
@@ -86,9 +89,11 @@ function localStore() {
   let uid = ls.get("ws-id"); if (!uid) { uid = "p" + rid() + rid(); ls.set("ws-id", uid); }
   return {
     uid, local: true,
+    serverTime: () => Date.now(),
     doc: p => ({
       get: async () => snap(p),
       set: async d => { docs.set(p, structuredClone(d)); notify(); },
+      merge: async d => { docs.set(p, { ...(docs.get(p) || {}), ...structuredClone(d) }); notify(); },
       update: async d => { const c = docs.get(p); if (!c) throw new Error("missing"); Object.assign(c, structuredClone(d)); notify(); },
       onSnapshot: next => listen(() => next(snap(p))),
     }),
@@ -140,6 +145,8 @@ async function boot() {
   const urlRoom = cleanCode(new URLSearchParams(location.search).get("room") || "");
   const lastRoom = ls.get("ws-room");
   setInterval(tick, 250);
+  setInterval(heartbeat, HEARTBEAT);
+  document.addEventListener("visibilitychange", heartbeat);
   if (S.name && urlRoom && urlRoom === lastRoom && !S.store.local) { await enterRoom(urlRoom, false, true); }
   S.invited = urlRoom || null;
   renderAll();
@@ -203,6 +210,40 @@ function subscribeGame(gid) {
     const m = {}; docs.forEach(d => { const x = d.data; if (x.struck) m[x.round + "|" + x.word] = true; }); S.strikes = m; renderAll();
   }, lost));
 }
+// ---------- who's here, who's ready ----------
+const ms = t => t?.toMillis ? t.toMillis() : typeof t === "number" ? t : 0;
+function heartbeat() {
+  if (!S.joined || document.visibilityState !== "visible") return;
+  S.store.doc(roomPath("/players/" + S.uid)).merge({ seenAt: S.store.serverTime() }).catch(() => {});
+}
+// The next round's id: a player is ready when their `ready` field equals it, so it resets itself each round.
+const readyKey = () => (S.game?.gameId || "") + ":" + ((S.game?.round || 0) + 1);
+function activeIds() {
+  const cutoff = now() - AWAY_AFTER;
+  return Object.keys(S.players).filter(id => id === S.uid || ms(S.players[id].seenAt) > cutoff);
+}
+function readyState() {
+  const active = activeIds(), key = readyKey();
+  const ready = active.filter(id => S.players[id].ready === key);
+  const mode = settings().ready;
+  const need = mode === "all" ? active.length : Math.floor(active.length / 2) + 1;
+  return { active, ready, need, mode, met: mode !== "off" && ready.length >= need && ready.length > 0, meReady: ready.includes(S.uid) };
+}
+async function setReady(on) {
+  try { await S.store.doc(roomPath("/players/" + S.uid)).merge({ ready: on ? readyKey() : null, seenAt: S.store.serverTime() }); }
+  catch (e) { failWrite(e); }
+}
+function maybeAutoStart() {
+  const p = phase(); if (p !== "lobby" && p !== "results") return;
+  const r = readyState();
+  // Only ready players try to start it; the transaction in startRound makes sure just one start lands.
+  if (r.met && r.meReady && S.autoKey !== readyKey()) { S.autoKey = readyKey(); startRound().then(ok => { if (!ok) setTimeout(() => S.autoKey = null, 2000); }); }
+}
+function onStartClick() {
+  if (settings().ready === "off") return startRound();
+  setReady(!readyState().meReady);
+}
+
 function lost(e) { console.error(e); note("Lost the connection to the table. Reload the page to rejoin."); }
 function note(t) { const n = $("notice"); n.textContent = t; n.hidden = !t; }
 let toastT = 0;
@@ -230,6 +271,7 @@ function tick() {
     renderAll();
   }
   if (p === "countdown" || p === "play") renderClock();
+  else maybeAutoStart();
 }
 
 // ---------- render ----------
@@ -307,18 +349,34 @@ function renderBetween(p) {
   const done = !g ? 0 : p === "results" ? g.round : g.round - 1;
   if (done >= 2) { tots.hidden = false; renderTotals(tots, done); } else tots.hidden = true;
 
-  const ids = Object.keys(S.players).sort((a, b) => (S.players[a].name || "").localeCompare(S.players[b].name || ""));
-  $("people").replaceChildren(...(ids.length ? ids.map(id => h("li", { class: id === S.uid ? "me" : null }, (S.players[id].name || "Player") + (id === S.uid ? " (you)" : ""))) : [h("li", null, "Nobody yet")]));
+  const r = readyState(), next = (g?.round || 0) + 1;
+  const pname = id => S.players[id]?.name || "Player";
+  const ids = [...r.active].sort((a, b) => pname(a).localeCompare(pname(b)));
+  $("people").replaceChildren(...ids.map(id => h("li", {
+    class: [id === S.uid ? "me" : "", r.mode !== "off" && r.ready.includes(id) ? "ready" : ""].join(" ").trim() || null,
+  }, pname(id) + (id === S.uid ? " (you)" : ""))));
   const first = !g || !g.round;
-  $("lobbytitle").textContent = first ? "Table " + S.room : "Ready for round " + (g.round + 1) + "?";
+  $("lobbytitle").textContent = first ? "Table " + S.room : "Ready for round " + next + "?";
   $("lobbycode").textContent = S.room;
   $("invitebox").hidden = !first;
-  $("startbtn").textContent = "Shake & start round " + ((g?.round || 0) + 1);
+  const btn = $("startbtn"), status = $("readystatus");
+  if (r.mode === "off") {
+    btn.textContent = "Shake & start round " + next; btn.classList.remove("isready"); status.hidden = true;
+  } else {
+    btn.textContent = r.meReady ? "✓ Ready (tap to undo)" : "I'm ready for round " + next;
+    btn.classList.toggle("isready", r.meReady);
+    const waiting = r.active.filter(id => !r.ready.includes(id)).map(pname);
+    status.hidden = false;
+    status.replaceChildren(h("b", null, `${r.ready.length} of ${r.active.length} ready`),
+      r.mode === "most" ? ` · starts at ${r.need}` : "",
+      waiting.length && waiting.length <= 4 ? ` · waiting for ${waiting.join(", ")}` : "");
+  }
 
   seg($("s-duration"), DURATIONS.map(s => [s, fmt(s)]), st.duration, v => writeSettings({ duration: v }));
   const ci = $("s-custom"); if (document.activeElement !== ci) ci.value = DURATIONS.includes(st.duration) ? "" : String(st.duration / 60);
   seg($("s-size"), [[4, "4 × 4"], [5, "5 × 5"]], st.size, v => writeSettings({ size: v }));
   seg($("s-min"), [[3, "3 letters"], [4, "4 letters"]], st.minLen, v => writeSettings({ minLen: v }));
+  seg($("s-ready"), [["all", "Everyone is ready"], ["most", "Most are ready"], ["off", "Anyone taps start"]], st.ready, v => writeSettings({ ready: v }));
   seg($("s-cancel"), [[true, "Cancel out (classic)"], [false, "Count for both"]], st.cancel, v => writeSettings({ cancel: v }));
   seg($("s-dict"), [[true, "On"], [false, "Off (anything goes)"]], st.dict, v => writeSettings({ dict: v }));
   $("newgamebtn").textContent = S.confirmNew ? "Tap again to reset" : "New game";
@@ -406,13 +464,13 @@ async function startRound() {
   const btn = $("startbtn"); btn.disabled = true;
   const seen = S.game?.round || 0;
   try {
-    await S.store.transact(roomPath(), cur => {
+    return await S.store.transact(roomPath(), cur => {
       if (!cur || (cur.round || 0) !== seen) return null; // someone else already started it
       const st = { ...DEF, ...(cur.settings || {}) }; const t = now();
       return { ...cur, round: seen + 1, board: roll(st.size), size: st.size, settings: st,
         startsAt: t + COUNTDOWN, endsAt: t + COUNTDOWN + st.duration * 1000 };
     });
-  } catch (e) { failWrite(e); }
+  } catch (e) { failWrite(e); return false; }
   finally { btn.disabled = false; }
 }
 async function newGame() {
@@ -557,7 +615,7 @@ $("nameinput").addEventListener("keydown", e => { if (e.key === "Enter") { e.pre
 $("mechip").addEventListener("click", () => { S.joined = false; S.invited = S.room; renderAll(); $("nameinput").focus(); });
 $("roomchip").addEventListener("click", invite);
 $("invitebtn").addEventListener("click", invite);
-$("startbtn").addEventListener("click", startRound);
+$("startbtn").addEventListener("click", onStartClick);
 $("newgamebtn").addEventListener("click", newGame);
 $("s-custom").addEventListener("change", e => { const m = parseFloat(e.target.value); if (m >= 0.5 && m <= 15) writeSettings({ duration: Math.round(m * 60) }); });
 
