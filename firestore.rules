@@ -6,7 +6,7 @@ service cloud.firestore {
       allow read: if request.auth != null;
       allow create, update: if request.auth != null
         && code.matches('^[A-Z0-9]{4,8}$')
-        && request.resource.data.keys().hasOnly(['code', 'gameId', 'round', 'board', 'size', 'settings', 'startsAt', 'endsAt', 'createdAt']);
+        && request.resource.data.keys().hasOnly(['code', 'gameId', 'round', 'board', 'size', 'settings', 'startsAt', 'endsAt', 'createdAt', 'deals']);
 
       // Each player writes only their own name.
       match /players/{uid} {

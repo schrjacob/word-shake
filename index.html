@@ -21,7 +21,7 @@
   --bg:#eef1f4; --surface:#ffffff; --ink:#14212b; --muted:#5b6b78; --line:#d5dde4;
   --tray:#1d4e63; --tray-edge:#123747; --die:#f7f4ec; --die-shade:#ddd6c4; --die-ink:#1b2228;
   --accent:#e99a0c; --accent-soft:#fbe7bf; --accent-ink:#3b2600;
-  --good:#2b8a56; --bad:#c3433a; --shared:#6a5acd;
+  --good:#2b8a56; --good-ink:#ffffff; --bad:#c3433a; --shared:#6a5acd;
   --display:"Archivo","Arial Narrow",system-ui,sans-serif;
   --body:"Atkinson Hyperlegible",system-ui,-apple-system,"Segoe UI",sans-serif;
 }
@@ -30,12 +30,12 @@
   --bg:#0e161c; --surface:#16212a; --ink:#e5ecf1; --muted:#92a3b0; --line:#25343f;
   --tray:#173f50; --tray-edge:#0a2330; --die:#ece6d8; --die-shade:#c7bea9; --die-ink:#1b2228;
   --accent:#f4b032; --accent-soft:#3d2f12; --accent-ink:#2c1c00;
-  --good:#4cc184; --bad:#ef6d62; --shared:#a093ff; color-scheme:dark}}
+  --good:#4cc184; --good-ink:#08240f; --bad:#ef6d62; --shared:#a093ff; color-scheme:dark}}
 :root[data-theme="dark"]{
   --bg:#0e161c; --surface:#16212a; --ink:#e5ecf1; --muted:#92a3b0; --line:#25343f;
   --tray:#173f50; --tray-edge:#0a2330; --die:#ece6d8; --die-shade:#c7bea9; --die-ink:#1b2228;
   --accent:#f4b032; --accent-soft:#3d2f12; --accent-ink:#2c1c00;
-  --good:#4cc184; --bad:#ef6d62; --shared:#a093ff; color-scheme:dark}
+  --good:#4cc184; --good-ink:#08240f; --bad:#ef6d62; --shared:#a093ff; color-scheme:dark}
 
 *{box-sizing:border-box}
 html{-webkit-text-size-adjust:100%}
@@ -112,8 +112,9 @@ input[type=text],input[type=number]{font:inherit;font-size:1.05rem;color:var(--i
 .seg{display:flex;flex-wrap:wrap;gap:6px}
 .seg button{border:1px solid var(--line);background:var(--bg);border-radius:9px;padding:8px 12px;font-size:.95rem;font-variant-numeric:tabular-nums}
 .seg button[aria-pressed=true]{background:var(--tray);border-color:var(--tray);color:#fff;font-weight:700}
-.custom{display:flex;align-items:center;gap:8px;font-size:.92rem;color:var(--muted)}
-.custom input{width:5.5em;padding:7px 9px;font-size:.95rem}
+.timeset{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+.timeset input{width:5.5em;text-align:center;font-family:var(--display);font-weight:800;font-size:1.25rem;font-variant-numeric:tabular-nums;padding:8px 10px}
+.hint{font-size:.85rem}
 .grid2{display:grid;grid-template-columns:1fr 1fr;gap:16px}
 @media (max-width:440px){.grid2{grid-template-columns:1fr}}
 
@@ -156,6 +157,9 @@ input[type=text],input[type=number]{font:inherit;font-size:1.05rem;color:var(--i
 @keyframes roll{50%{transform:rotate(6deg) scale(.95)}}
 @media (prefers-reduced-motion:reduce){.tray.rolling .die,.word.bad,.word.dup{animation:none}.timebar i{transition:none}}
 
+.reroll{display:flex;align-items:center;justify-content:center;gap:8px 12px;flex-wrap:wrap;min-height:34px;font-size:.92rem;color:var(--muted);text-align:center}
+.reroll .linkbtn{align-self:center}
+.reroll.asking{background:var(--accent-soft);color:var(--ink);border-radius:12px;padding:8px 12px}
 .typer{display:flex;gap:8px}
 .typer input{flex:1;min-width:0;text-transform:uppercase;letter-spacing:.05em}
 .typer .btn{padding:10px 16px;font-size:1rem}
@@ -166,6 +170,8 @@ input[type=text],input[type=number]{font:inherit;font-size:1.05rem;color:var(--i
   background:var(--bg);border:1px solid var(--line);border-radius:8px;padding:4px 8px;display:inline-flex;gap:5px;align-items:baseline}
 .words .pts{font-family:var(--body);font-size:.75rem;color:var(--muted);font-weight:700}
 .words .fresh{border-color:var(--accent);background:var(--accent-soft)}
+.words button.scored{background:var(--good);border-color:var(--good);color:var(--good-ink)}
+.words button.scored .pts{color:var(--good-ink);opacity:.85}
 .words button.shared{border-style:dashed;border-color:var(--shared)}
 .words button.shared .pts{color:var(--shared)}
 .words button.struck{text-decoration:line-through;color:var(--muted);opacity:.7}
@@ -256,6 +262,7 @@ table.totals{width:100%;border-collapse:collapse;font-variant-numeric:tabular-nu
     <div class="timer" id="timer"><div class="timebar"><i id="timefill"></i></div><div class="clock" id="clock">0:00</div></div>
     <div class="word" id="word" aria-live="polite"></div>
     <div class="tray" id="tray"><div class="grid" id="grid"></div><div class="countdown" id="countdown" hidden></div></div>
+    <div class="reroll" id="reroll" aria-live="polite"></div>
     <form class="typer" id="typeform" autocomplete="off">
       <input type="text" id="typeinput" placeholder="Or type a word" aria-label="Type a word" autocapitalize="characters" spellcheck="false">
       <button class="btn" type="submit">Add</button>
@@ -284,9 +291,12 @@ table.totals{width:100%;border-collapse:collapse;font-variant-numeric:tabular-nu
     </div>
     <div class="panel" id="settings">
       <h2>Settings</h2>
-      <div class="setting"><h3>Timer</h3>
-        <div class="seg" id="s-duration"></div>
-        <label class="custom" for="s-custom">Custom: <input type="number" id="s-custom" min="0.5" max="15" step="0.5"> minutes</label>
+      <div class="setting"><h3><label for="s-time">Timer</label></h3>
+        <div class="timeset">
+          <input type="text" id="s-time" value="3:00" inputmode="decimal" autocomplete="off" aria-describedby="s-time-hint">
+          <button class="btn ghost small" id="s-time-reset" type="button">Reset to 3:00</button>
+        </div>
+        <p class="muted hint" id="s-time-hint">Minutes and seconds, like 2:30.</p>
       </div>
       <div class="grid2">
         <div class="setting"><h3>Board</h3><div class="seg" id="s-size"></div></div>

@@ -8,7 +8,6 @@ const DICE4 = ["AAEEGN","ABBJOO","ACHOPS","AFFKPS","AOOTTW","CIMOTU","DEILRX","D
 const DICE5 = ["AAAFRS","AAEEEE","AAFIRS","ADENNN","AEEEEM","AEEGMU","AEGMNN","AFIRSY","BJKQXZ","CCENST","CEIILT","CEILPT","CEIPST","DDHNOT","DHHLOR","DHLNOR","DHLNOR","EIIITT","EMOTTT","ENSSSU","FIPRSY","GORRVW","IPRRRY","NOOTUW","OOOTTU"];
 const DEF = { duration: 180, size: 4, minLen: 3, cancel: true, dict: true, ready: "all" };
 const HEARTBEAT = 25000, AWAY_AFTER = 75000; // players whose page hasn't checked in for 75 s don't count
-const DURATIONS = [60, 90, 120, 180, 240, 300];
 const COUNTDOWN = 3500;
 const pts = n => n < 3 ? 0 : n <= 4 ? 1 : n === 5 ? 2 : n === 6 ? 3 : n === 7 ? 5 : 11;
 const FIREBASE_VERSION = "10.12.2";
@@ -239,6 +238,40 @@ function maybeAutoStart() {
   // Only ready players try to start it; the transaction in startRound makes sure just one start lands.
   if (r.met && r.meReady && S.autoKey !== readyKey()) { S.autoKey = readyKey(); startRound().then(ok => { if (!ok) setTimeout(() => S.autoKey = null, 2000); }); }
 }
+// New letters mid-round: each player who wants them sets `reroll` to this deal's key; once every
+// active player has, a new board is dealt and the timer restarts.
+function rerollState() {
+  const active = activeIds(), key = roundKey();
+  const want = active.filter(id => S.players[id].reroll === key);
+  return { active, want, met: want.length > 0 && want.length === active.length, mine: want.includes(S.uid) };
+}
+async function askReroll(on) {
+  try { await S.store.doc(roomPath("/players/" + S.uid)).merge({ reroll: on ? roundKey() : null, seenAt: S.store.serverTime() }); }
+  catch (e) { failWrite(e); }
+}
+function maybeReroll() {
+  if (phase() !== "play") return;
+  const r = rerollState();
+  if (r.met && r.mine && S.rerollKey !== roundKey()) {
+    S.rerollKey = roundKey();
+    reroll().then(ok => { if (!ok) setTimeout(() => S.rerollKey = null, 2000); });
+  }
+}
+async function reroll() {
+  const g = S.game, round = g.round, deal = dealOf(round), k = g.gameId + "-" + round;
+  try {
+    return await S.store.transact(roomPath(), cur => {
+      if (!cur || cur.gameId !== g.gameId || cur.round !== round || (cur.deals?.[k] || 0) !== deal) return null;
+      const t = now(), length = cur.endsAt - cur.startsAt;
+      return { ...cur, deals: { ...(cur.deals || {}), [k]: deal + 1 }, board: roll(cur.size || 4), startsAt: t + COUNTDOWN, endsAt: t + COUNTDOWN + length };
+    });
+  } catch (e) {
+    failWrite(e);
+    if (e?.code === "permission-denied") note("New boards need the updated database rules. Paste firestore.rules into the Firebase console (README step 4).");
+    return false;
+  }
+}
+
 function onStartClick() {
   if (settings().ready === "off") return startRound();
   setReady(!readyState().meReady);
@@ -254,11 +287,14 @@ function phase() {
   const g = S.game; if (!g || !g.round) return "lobby";
   const t = now(); if (t < g.startsAt) return "countdown"; if (t < g.endsAt) return "play"; return "results";
 }
-function roundKey() { const g = S.game; return g && g.round ? g.gameId + "-" + g.round : ""; }
+// A round can be re-dealt (new letters) when everyone asks; `deals` counts re-deals per round.
+const dealOf = round => S.game?.deals?.[S.game.gameId + "-" + round] || 0;
+const inDeal = (s, round) => s.round === round && (s.deal || 0) === dealOf(round);
+function roundKey() { const g = S.game; return g && g.round ? g.gameId + "-" + g.round + "-" + dealOf(g.round) : ""; }
 function syncRoundKey() { const k = roundKey(); if (k !== S.foundKey) { S.foundKey = k; S.found = []; S.fresh = null; restoreMine(); } }
 function restoreMine() {
   if (S.found.length || !S.game) return;
-  const mine = S.subs.find(s => s.uid === S.uid && s.round === S.game.round && s.gameId === S.game.gameId);
+  const mine = S.subs.find(s => s.uid === S.uid && s.gameId === S.game.gameId && inDeal(s, S.game.round));
   if (mine) S.found = [...mine.words];
 }
 function tick() {
@@ -269,8 +305,10 @@ function tick() {
     if (p === "play") wake(true);
     if (prev === "play" && p === "results") { endTrace(); wake(false); buzz([60, 40, 60]); }
     renderAll();
+    // A new round (or a re-deal) starts at the top of the page, so the timer is in view.
+    if (p === "countdown" || (p === "play" && prev !== "countdown")) window.scrollTo(0, 0);
   }
-  if (p === "countdown" || p === "play") renderClock();
+  if (p === "countdown" || p === "play") { renderClock(); maybeReroll(); }
   else maybeAutoStart();
 }
 
@@ -316,7 +354,24 @@ function renderPlay(p) {
     $("countdown").hidden = p !== "countdown";
     $("word").textContent = ""; $("word").className = "word";
   }
-  renderFound(); renderOthers(); renderClock();
+  renderFound(); renderOthers(); renderReroll(); renderClock();
+}
+function renderReroll() {
+  const el = $("reroll");
+  if (phase() !== "play") { el.className = "reroll"; el.replaceChildren(); return; }
+  const r = rerollState(), pname = id => S.players[id]?.name || "Player";
+  if (!r.want.length) {
+    el.className = "reroll";
+    el.replaceChildren(h("button", { type: "button", class: "linkbtn", onclick: () => askReroll(true) }, "Bad letters? Ask for a new board"));
+    return;
+  }
+  const others = r.want.filter(id => id !== S.uid).map(pname);
+  const who = r.mine ? (others.length ? "You and " + others.join(", ") : "You") : others.join(", ");
+  const verb = !r.mine && others.length === 1 ? " wants" : " want";
+  el.className = "reroll asking";
+  el.replaceChildren(
+    h("span", null, h("b", null, who), verb + " new letters · ", h("b", null, `${r.want.length} of ${r.active.length}`), " agree"),
+    h("button", { type: "button", class: "btn small" + (r.mine ? " ghost" : ""), onclick: () => askReroll(!r.mine) }, r.mine ? "Never mind" : "Me too"));
 }
 function renderClock() {
   const g = S.game; if (!g) return; const t = now();
@@ -336,7 +391,7 @@ function renderFound() {
   $("nowords").hidden = S.found.length > 0;
 }
 function renderOthers() {
-  const g = S.game; const others = S.subs.filter(s => s.round === g.round && s.uid !== S.uid);
+  const g = S.game; const others = S.subs.filter(s => inDeal(s, g.round) && s.uid !== S.uid);
   $("others").replaceChildren(...(others.length ? [h("span", null, "Others:")] : []),
     ...others.map(s => h("span", null, nameOf(s) + " ", h("b", null, s.words.length))));
 }
@@ -372,8 +427,8 @@ function renderBetween(p) {
       waiting.length && waiting.length <= 4 ? ` · waiting for ${waiting.join(", ")}` : "");
   }
 
-  seg($("s-duration"), DURATIONS.map(s => [s, fmt(s)]), st.duration, v => writeSettings({ duration: v }));
-  const ci = $("s-custom"); if (document.activeElement !== ci) ci.value = DURATIONS.includes(st.duration) ? "" : String(st.duration / 60);
+  const ti = $("s-time"); if (document.activeElement !== ti) ti.value = fmt(st.duration);
+  $("s-time-reset").disabled = st.duration === DEF.duration;
   seg($("s-size"), [[4, "4 × 4"], [5, "5 × 5"]], st.size, v => writeSettings({ size: v }));
   seg($("s-min"), [[3, "3 letters"], [4, "4 letters"]], st.minLen, v => writeSettings({ minLen: v }));
   seg($("s-ready"), [["all", "Everyone is ready"], ["most", "Most are ready"], ["off", "Anyone taps start"]], st.ready, v => writeSettings({ ready: v }));
@@ -387,7 +442,7 @@ function seg(el, opts, cur, on) {
 }
 
 function tally(round) {
-  const subs = S.subs.filter(s => s.round === round);
+  const subs = S.subs.filter(s => inDeal(s, round));
   const rules = { ...settings(), ...(subs[0]?.rules || {}) };
   const count = {};
   subs.forEach(s => new Set(s.words).forEach(w => { if (!S.strikes[round + "|" + w]) count[w] = (count[w] || 0) + 1; }));
@@ -413,7 +468,8 @@ function renderResults(el, round) {
     S.missed[key] ||= solve(g.board, g.size || 4, rules.minLen || 3);
     const foundAll = new Set(rows.flatMap(r => r.words.map(x => x.w)));
     const missed = S.missed[key].filter(w => !foundAll.has(w)).sort((a, b) => b.length - a.length || a.localeCompare(b));
-    if (missed.length) missedEl = h("details", null,
+    // Remember whether the list is open, since results redraw whenever anyone changes anything.
+    if (missed.length) missedEl = h("details", { open: S.missedOpen?.[key] || null, ontoggle: e => { (S.missedOpen ||= {})[key] = e.target.open; } },
       h("summary", null, `Words nobody found (${missed.length})`),
       h("ul", { class: "words missed" }, missed.slice(0, 80).map(w => h("li", null, w))),
       missed.length > 80 ? h("p", { class: "muted", style: "margin-top:8px;font-size:.85rem" }, `Showing the 80 longest.`) : null);
@@ -430,7 +486,7 @@ function renderResults(el, round) {
       h("div", { class: "scoreline" }, h("span", { class: "rank" }, i + 1), h("span", { class: "pname" }, r.name + (r.uid === S.uid ? " (you)" : "")),
         h("span", { class: "pscore" }, r.score, h("small", null, r.words.length + (r.words.length === 1 ? " word" : " words")))),
       r.words.length ? h("div", { class: "words" }, r.words.map(x => h("button", {
-        type: "button", class: (x.struck ? "struck" : x.shared ? "shared" : ""),
+        type: "button", class: (x.struck ? "struck" : x.shared ? "shared" : x.pts ? "scored" : ""),
         title: x.struck ? "Challenged. Tap to restore" : "Tap to challenge",
         onclick: () => toggleStrike(round, x.w, !x.struck),
       }, x.w, h("span", { class: "pts" }, x.struck ? "✕" : x.pts ? "+" + x.pts : "0")))) : h("p", { class: "muted" }, "No words this round.")
@@ -489,8 +545,9 @@ async function save() {
     dirty = false; const g = S.game; if (!g) break;
     const st = settings();
     try {
-      await S.store.doc(roomPath(`/subs/${g.gameId}-${g.round}-${S.uid}`)).set({
-        gameId: g.gameId, round: g.round, uid: S.uid, name: S.name, words: [...S.found],
+      const deal = dealOf(g.round);
+      await S.store.doc(roomPath(`/subs/${g.gameId}-${g.round}-${deal ? deal + "-" : ""}${S.uid}`)).set({
+        gameId: g.gameId, round: g.round, deal, uid: S.uid, name: S.name, words: [...S.found],
         rules: { cancel: st.cancel, minLen: st.minLen }, at: Date.now() });
     } catch (e) { failWrite(e); break; }
   }
@@ -633,6 +690,15 @@ $("roomchip").addEventListener("click", invite);
 $("invitebtn").addEventListener("click", invite);
 $("startbtn").addEventListener("click", onStartClick);
 $("newgamebtn").addEventListener("click", newGame);
-$("s-custom").addEventListener("change", e => { const m = parseFloat(e.target.value); if (m >= 0.5 && m <= 15) writeSettings({ duration: Math.round(m * 60) }); });
+// Round length: "m:ss" (2:30) or whole minutes (3).
+$("s-time").addEventListener("change", () => {
+  const ti = $("s-time"), m = ti.value.trim().match(/^(\d{1,2})(?::([0-5]?\d))?$/);
+  const secs = m ? (+m[1]) * 60 + (m[2] !== undefined ? +m[2] : 0) : NaN;
+  if (!(secs >= 15 && secs <= 1800)) { toast("Type a time between 0:15 and 30:00, like 2:30"); ti.value = fmt(settings().duration); return; }
+  ti.value = fmt(secs);
+  if (secs !== settings().duration) writeSettings({ duration: secs });
+});
+$("s-time").addEventListener("keydown", e => { if (e.key === "Enter") { e.preventDefault(); e.target.blur(); } });
+$("s-time-reset").addEventListener("click", () => { $("s-time").value = fmt(DEF.duration); writeSettings({ duration: DEF.duration }); });
 
 boot();
