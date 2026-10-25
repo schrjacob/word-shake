@@ -1,0 +1,33 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // A table. Anyone signed in (players sign in anonymously) can read and run it.
+    match /rooms/{code} {
+      allow read: if request.auth != null;
+      allow create, update: if request.auth != null
+        && code.matches('^[A-Z0-9]{4,8}$')
+        && request.resource.data.keys().hasOnly(['code', 'gameId', 'round', 'board', 'size', 'settings', 'startsAt', 'endsAt', 'createdAt']);
+
+      // Each player writes only their own name.
+      match /players/{uid} {
+        allow read: if request.auth != null;
+        allow create, update: if request.auth != null && request.auth.uid == uid
+          && request.resource.data.name is string && request.resource.data.name.size() <= 20;
+      }
+
+      // Each player writes only their own word list.
+      match /subs/{id} {
+        allow read: if request.auth != null;
+        allow create, update: if request.auth != null
+          && request.resource.data.uid == request.auth.uid
+          && request.resource.data.words is list && request.resource.data.words.size() <= 500;
+      }
+
+      // Word challenges: anyone at the table can challenge or restore a word.
+      match /strikes/{id} {
+        allow read: if request.auth != null;
+        allow create, update: if request.auth != null && request.resource.data.word is string;
+      }
+    }
+  }
+}
