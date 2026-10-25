@@ -61,9 +61,9 @@ To publish changes later, commit and push; Pages updates on its own.
 ## Testing on your computer
 
 ```bash
-python -m http.server 8765
+python -m http.server 8780
 ```
 
-Then open <http://localhost:8765>. (Opening `index.html` directly from the file system won't work,
+Then open <http://localhost:8780>. (Opening `index.html` directly from the file system won't work,
 because browsers block the script and word list from loading that way.)
 To test multiplayer locally, also add `localhost` to Firebase's authorized domains (it's usually there by default).

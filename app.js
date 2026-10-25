@@ -285,7 +285,7 @@ function renderAll() {
   const playing = !showJoin && (p === "play" || p === "countdown");
   $("v-play").hidden = !playing;
   $("v-between").hidden = showJoin || playing;
-  $("mechip").hidden = $("roomchip").hidden = !S.joined;
+  $("chips").hidden = !S.joined;
   if (S.joined) {
     $("mechip").replaceChildren(h("b", null, S.name));
     $("roomchip").replaceChildren("Table ", h("span", { class: "code" }, S.room));
@@ -594,6 +594,22 @@ async function wake(on) {
   try { if (on && !lock) lock = await navigator.wakeLock?.request("screen"); else if (!on && lock) { await lock.release(); lock = null; } }
   catch { lock = null; }
 }
+
+// ---------- light / dark ----------
+// Follows the device setting until the player taps the toggle; after that their choice is remembered.
+const darkQuery = matchMedia("(prefers-color-scheme: dark)");
+const isDark = () => (document.documentElement.dataset.theme || (darkQuery.matches ? "dark" : "light")) === "dark";
+function syncThemeToggle() {
+  const label = isDark() ? "Switch to light mode" : "Switch to dark mode";
+  $("themetoggle").setAttribute("aria-label", label); $("themetoggle").title = label;
+  document.querySelector('meta[name="theme-color"]').content = isDark() ? "#0e161c" : "#1d4e63";
+}
+$("themetoggle").addEventListener("click", () => {
+  const next = isDark() ? "light" : "dark";
+  document.documentElement.dataset.theme = next; ls.set("ws-theme", next); syncThemeToggle();
+});
+darkQuery.addEventListener("change", syncThemeToggle);
+syncThemeToggle();
 
 // ---------- wiring ----------
 $("typeform").addEventListener("submit", e => {
